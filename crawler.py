@@ -33,11 +33,11 @@ from playwright.sync_api import sync_playwright
 
 # ====================== CONFIG ======================
 
-UN_RSS_URL = "https://careers.un.org/jobfeed?isPage=true&language=en"
+UN_RSS_URL = "https://careers.un.org/jobfeed"
 
 # Add more UN-system RSS feeds here easily
 EXTRA_RSS_SOURCES = [
-    # ("UNDP", "https://jobs.undp.org/cj_view_jobs.cfm?rss"),
+    ("UNDP", "https://jobs.undp.org/cj_view_jobs.cfm?rss"),
     # ("UNHCR", "https://www.unhcr.org/careers/rss"),
 ]
 
@@ -266,7 +266,7 @@ def get_rss_jobs(source_name: str, rss_url: str) -> list:
 
 
 def get_au_jobs() -> list:
-    """Scrape AU Jobs site using Playwright with safety guards."""
+    """Scrape AU Jobs site using Playwright with improved selectors and safety."""
     jobs = []
     for attempt in range(1, MAX_RETRIES + 1):
         try:
@@ -280,45 +280,82 @@ def get_au_jobs() -> list:
                     timeout=60000,
                 )
 
-                try:
-                    page.wait_for_selector("main, #content, .jobs-list", timeout=10000)
-                except Exception:
-                    log.warning("Could not find main content container, using full page.")
-
-                page.wait_for_selector("a[href*='/job/']", timeout=30000)
-                job_elements = page.query_selector_all("a[href*='/job/']")
-
-                seen_links = set()
-                for el in job_elements:
-                    href = el.get_attribute("href") or ""
-                    if not href or href == "/" or "job" not in href:
+                # Wait for page to load and look for job listings
+                # Try multiple selectors as the site structure may vary
+                selectors_to_try = [
+                    "div[data-job], a[href*='job'], div[class*='job'], article",
+                    "a[href*='/job/'], a[href*='?job']",
+                    "div[class*='listing'], div[class*='vacancy']",
+                    "tr[class*='job'], td[class*='job']",
+                ]
+                
+                found_jobs = False
+                for selector in selectors_to_try:
+                    try:
+                        page.wait_for_selector(selector, timeout=5000)
+                        job_elements = page.query_selector_all(selector)
+                        if job_elements and len(job_elements) > 3:  # Skip if only nav/header links
+                            log.info(f"Found job elements using selector: {selector}")
+                            found_jobs = True
+                            
+                            seen_links = set()
+                            for el in job_elements:
+                                try:
+                                    # Try to extract link and title
+                                    href = el.get_attribute("href") or ""
+                                    if not href:
+                                        link_el = el.query_selector("a")
+                                        if link_el:
+                                            href = link_el.get_attribute("href") or ""
+                                    
+                                    if not href or href.startswith("#"):
+                                        continue
+                                    
+                                    full_link = href if href.startswith("http") else ("https://jobs.au.int" + href if href.startswith("/") else "https://jobs.au.int/" + href)
+                                    
+                                    if full_link in seen_links or "job" not in full_link.lower():
+                                        continue
+                                    seen_links.add(full_link)
+                                    
+                                    # Extract title
+                                    title = el.inner_text().strip()
+                                    if not title or len(title) > 500:  # Skip if no title or too long
+                                        title_el = el.query_selector("h1, h2, h3, h4, strong, b")
+                                        if title_el:
+                                            title = title_el.inner_text().strip()
+                                        else:
+                                            continue
+                                    
+                                    title = title[:200]  # Limit title length
+                                    
+                                    jobs.append({
+                                        "source": "AU",
+                                        "id": full_link,
+                                        "title": title,
+                                        "link": full_link,
+                                        "description": "",
+                                    })
+                                except Exception as e:
+                                    log.debug(f"Error processing job element: {e}")
+                                    continue
+                            
+                            if jobs:
+                                break
+                    except Exception:
                         continue
-
-                    full_link = (
-                        "https://jobs.au.int" + href if href.startswith("/") else href
-                    )
-                    if full_link in seen_links:
-                        continue
-                    seen_links.add(full_link)
-
-                    title_el = el.query_selector("h3, h2, .job-title, strong")
-                    title = (
-                        title_el.inner_text().strip() if title_el else el.inner_text().strip()
-                    ) or "No Title"
-
-                    jobs.append(
-                        {
-                            "source": "AU",
-                            "id": full_link,
-                            "title": title,
-                            "link": full_link,
-                            "description": "",
-                        }
-                    )
 
                 browser.close()
-            log.info(f"Found {len(jobs)} AU jobs from website.")
-            return jobs
+                
+                if jobs:
+                    log.info(f"Found {len(jobs)} AU jobs from website.")
+                    return jobs
+                elif found_jobs:
+                    log.warning("AU Jobs page loaded but no valid job listings extracted.")
+                    return []
+                else:
+                    log.warning("Could not find job listings on AU Jobs page (may be behind heavy JavaScript).")
+                    return []
+                    
         except Exception as e:
             log.warning(f"AU Jobs scrape attempt {attempt} failed: {e}")
             if attempt < MAX_RETRIES:

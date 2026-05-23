@@ -6,3 +6,6 @@ __pycache__/
 job_alert.log
 .vscode/
 .DS_Store
+.env
+.env.local
+jobs_seen.db
